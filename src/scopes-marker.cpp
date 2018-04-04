@@ -107,7 +107,7 @@ public:
           for(auto rit = vars.rbegin(); rit != vars.rend(); ++rit) {
               if (rit->name == "" && !rit->isLoop)
                   break;
-              if (rit->locStart.isBeforeInTranslationUnitThan(SL)) {
+              if (rit->name != "" && rit->locStart.isBeforeInTranslationUnitThan(SL)) {
                   std::string s = "__CSM__lifetimeEnd(" + rit->name + ");\n";
                   TheRewriter.InsertTextBefore(SL, s);
               }
@@ -115,6 +115,18 @@ public:
       }
 
       // Process breaks and continues.
+      if (isa<BreakStmt>(s) || isa<ContinueStmt>(s)) {
+          FullSourceLoc SL = AContext.getFullLoc(s->getSourceRange().getBegin());
+          for(auto rit = vars.rbegin(); rit != vars.rend(); ++rit) {
+              if (rit->name == "" && rit->isLoop)
+                  break;
+              if (rit->name != "" && rit->locStart.isBeforeInTranslationUnitThan(SL)) {
+                  std::string s = "__CSM__lifetimeEnd(" + rit->name + ");\n";
+                  TheRewriter.InsertTextBefore(SL, s);
+              }
+          }
+      }
+
 
       return true;
   }
