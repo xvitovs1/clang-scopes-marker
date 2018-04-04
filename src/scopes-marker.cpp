@@ -11,6 +11,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -31,70 +32,117 @@
 #include "llvm/IR/Module.h"
 
 using namespace clang;
+struct VarInfo {
+    VarInfo(std::string n, FullSourceLoc start, FullSourceLoc end, bool isL = false) :
+        name(n), locStart(start), locEnd(end), isLoop(isL) {}
+
+    std::string name = "";
+    FullSourceLoc locStart;
+    FullSourceLoc locEnd;
+    bool isLoop = false;
+};
 
 // By implementing RecursiveASTVisitor, we can specify which AST nodes
 // we're interested in by overriding relevant methods.
 class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 public:
-  MyASTVisitor(Rewriter &R) : TheRewriter(R) {}
+  MyASTVisitor(Rewriter &R, ASTContext &AC) : TheRewriter(R), AContext(AC) {}
 
-  bool VisitStmt(Stmt *s) {
-    // Only care about If statements.
-    if (isa<IfStmt>(s)) {
-      IfStmt *IfStatement = cast<IfStmt>(s);
-      Stmt *Then = IfStatement->getThen();
+  bool VisitStmt(Stmt* s) {
 
-      TheRewriter.InsertText(Then->getLocStart(), "// the 'if' part\n", true,
-                             true);
+      FullSourceLoc loc = AContext.getFullLoc(s->getSourceRange().getBegin());
+      if (!vars.empty()) {
+        FullSourceLoc varLoc = vars.back().locEnd;
+        while (!vars.empty() && varLoc.isBeforeInTranslationUnitThan(loc)) {
+            vars.pop_back();
+            varLoc = vars.back().locEnd;
+        }
+      }
 
-      Stmt *Else = IfStatement->getElse();
-      if (Else)
-        TheRewriter.InsertText(Else->getLocStart(), "// the 'else' part\n",
-                               true, true);
-    }
+      // Process compound statements.
+      if (isa<CompoundStmt>(s)) {
+          Stmt* last = nullptr;
+          std::vector<std::string> localVars;
+          CompoundStmt *compoundStmt = cast<CompoundStmt>(s);
 
-    return true;
+          for (auto* c : compoundStmt->children()) {
+              if (isa<DeclStmt>(c)) {
+                  DeclStmt* ds = cast<DeclStmt>(c);
+                  for (auto* d : ds->decls()) {
+                      VarDecl* varDecl = dyn_cast<VarDecl>(d);
+                      if (varDecl && varDecl->isLocalVarDecl()) {
+                          localVars.push_back(varDecl->getNameAsString());
+                          vars.push_back(VarInfo(varDecl->getNameAsString(),
+                             AContext.getFullLoc(varDecl->getSourceRange().getEnd()),
+                             AContext.getFullLoc(compoundStmt->getSourceRange().getEnd()),
+                             false));
+                      }
+                  }
+              }
+              last = c;
+          }
+
+          SourceLocation SL;
+          if(last && !isa<ReturnStmt>(last) && !isa<BreakStmt>(last)
+              && !isa<ContinueStmt>(last)) {
+              SL = compoundStmt->getSourceRange().getEnd();
+              for (const auto& v : localVars) {
+                  std::string s = "__CSM__lifetimeEnd(" + v + ");\n";
+                  TheRewriter.InsertTextBefore(SL, s);
+              }
+          }
+      }
+
+      // Process loops.
+      if (isa<ForStmt>(s) || isa<DoStmt>(s) || isa<WhileStmt>(s)) {
+          vars.push_back(VarInfo("",
+                  AContext.getFullLoc(s->getSourceRange().getBegin()),
+                  AContext.getFullLoc(s->getSourceRange().getEnd()),
+                  true));
+      }
+
+      // Process returns.
+      if (isa<ReturnStmt>(s)) {
+          FullSourceLoc SL = AContext.getFullLoc(s->getSourceRange().getBegin());
+          for(auto rit = vars.rbegin(); rit != vars.rend(); ++rit) {
+              if (rit->name == "" && !rit->isLoop)
+                  break;
+              if (rit->locStart.isBeforeInTranslationUnitThan(SL)) {
+                  std::string s = "__CSM__lifetimeEnd(" + rit->name + ");\n";
+                  TheRewriter.InsertTextBefore(SL, s);
+              }
+          }
+      }
+
+      // Process breaks and continues.
+
+      return true;
   }
 
   bool VisitFunctionDecl(FunctionDecl *f) {
-    // Only function definitions (with bodies), not declarations.
-    if (f->hasBody()) {
-      Stmt *FuncBody = f->getBody();
+      // Only function definitions (with bodies), not declarations.
+      if (f->hasBody()) {
+          vars.push_back(VarInfo("",
+                  AContext.getFullLoc(f->getSourceRange().getBegin()),
+                  AContext.getFullLoc(f->getSourceRange().getEnd()),
+                  false));
 
-      // Type name as string
-      QualType QT = f->getReturnType();
-      std::string TypeStr = QT.getAsString();
+      }
 
-      // Function name
-      DeclarationName DeclName = f->getNameInfo().getName();
-      std::string FuncName = DeclName.getAsString();
-
-      // Add comment before
-      std::stringstream SSBefore;
-      SSBefore << "// Begin function " << FuncName << " returning " << TypeStr
-               << "\n";
-      SourceLocation ST = f->getSourceRange().getBegin();
-      TheRewriter.InsertText(ST, SSBefore.str(), true, true);
-
-      // And after
-      std::stringstream SSAfter;
-      SSAfter << "\n// End function " << FuncName;
-      ST = FuncBody->getLocEnd().getLocWithOffset(1);
-      TheRewriter.InsertText(ST, SSAfter.str(), true, true);
-    }
-
-    return true;
+      return true;
   }
 
 private:
+  std::vector<VarInfo> vars;
   Rewriter &TheRewriter;
+  ASTContext& AContext;
 };
 
 // Implementation of the ASTConsumer interface for reading an AST produced
 // by the Clang parser.
 class MyASTConsumer : public ASTConsumer {
 public:
-  MyASTConsumer(Rewriter &R) : Visitor(R) {}
+  MyASTConsumer(Rewriter &R, ASTContext &AC) : Visitor(R, AC) {}
 
   // Override the method that gets called for each parsed top-level
   // declaration.
@@ -110,11 +158,11 @@ private:
 };
 
 void instrumentAndEmitLLVM(llvm::Module& M) {
-    for(llvm::Function& F : M) {
+   /* for(llvm::Function& F : M) {
         for(auto& I : F) {
             I.dump();
         }
-    }
+    }*/
 }
 
 int main(int argc, char *argv[]) {
@@ -158,7 +206,7 @@ int main(int argc, char *argv[]) {
 
     // Create an AST consumer instance which is going to get called by
     // ParseAST.
-    MyASTConsumer TheConsumer(TheRewriter);
+    MyASTConsumer TheConsumer(TheRewriter, TheCompInst.getASTContext());
 
     // Parse the file to AST, registering our consumer as the AST consumer.
     ParseAST(TheCompInst.getPreprocessor(), &TheConsumer,
