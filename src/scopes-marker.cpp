@@ -1,17 +1,10 @@
-//------------------------------------------------------------------------------
-// Clang rewriter sample. Demonstrates:
-//
-// * How to use RecursiveASTVisitor to find interesting AST nodes.
-// * How to use the Rewriter API to rewrite the source code.
-//
-// Eli Bendersky (eliben@gmail.com)
-// This code is in the public domain
-//------------------------------------------------------------------------------
 #include <cstdio>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <iostream>
+#include <fstream>
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -30,8 +23,27 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Module.h"
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Instruction.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/Support/raw_os_ostream.h>
+
+#if LLVM_VERSION_MAJOR >= 4 || (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR >= 5)
+#include "llvm/IR/InstIterator.h"
+#else
+#include "llvm/Support/InstIterator.h"
+#endif
+
+#if LLVM_VERSION_MAJOR >= 4
+#include <llvm/Bitcode/BitcodeWriter.h>
+#else
+#include <llvm/Bitcode/ReaderWriter.h>
+#endif
 
 using namespace clang;
+
+const std::string F_NAME = "__CSM_lifetime_end";
+
 struct VarInfo {
     VarInfo(std::string n, FullSourceLoc start, FullSourceLoc end, bool isL = false) :
         name(n), locStart(start), locEnd(end), isLoop(isL) {}
@@ -87,8 +99,7 @@ public:
               && !isa<ContinueStmt>(last)) {
               SL = compoundStmt->getSourceRange().getEnd();
               for (const auto& v : localVars) {
-                  std::string s = "__CSM__lifetimeEnd(" + v + ");\n";
-                  TheRewriter.InsertTextBefore(SL, s);
+                  TheRewriter.InsertTextBefore(SL, getFunctionCall(v));
               }
           }
       }
@@ -108,8 +119,7 @@ public:
               if (rit->name == "" && !rit->isLoop)
                   break;
               if (rit->name != "" && rit->locStart.isBeforeInTranslationUnitThan(SL)) {
-                  std::string s = "__CSM__lifetimeEnd(" + rit->name + ");\n";
-                  TheRewriter.InsertTextBefore(SL, s);
+                  TheRewriter.InsertTextBefore(SL, getFunctionCall(rit->name));
               }
           }
       }
@@ -121,8 +131,7 @@ public:
               if (rit->name == "" && rit->isLoop)
                   break;
               if (rit->name != "" && rit->locStart.isBeforeInTranslationUnitThan(SL)) {
-                  std::string s = "__CSM__lifetimeEnd(" + rit->name + ");\n";
-                  TheRewriter.InsertTextBefore(SL, s);
+                  TheRewriter.InsertTextBefore(SL, getFunctionCall(rit->name));
               }
           }
       }
@@ -148,6 +157,10 @@ private:
   std::vector<VarInfo> vars;
   Rewriter &TheRewriter;
   ASTContext& AContext;
+
+  std::string getFunctionCall(std::string varName) {
+       return F_NAME + "(sizeof(" + varName + "), (void*)" + varName + ");\n";
+  }
 };
 
 // Implementation of the ASTConsumer interface for reading an AST produced
@@ -169,17 +182,37 @@ private:
   MyASTVisitor Visitor;
 };
 
+void emitLLVM(llvm::Module& M) {
+    // Write instrumented module into the output file
+    std::ofstream ofs("out.bc");
+    llvm::raw_os_ostream ostream(ofs);
+
+    // Write the module
+    llvm::errs() << "Saving the module to out.bc " << "\n";
+    llvm::WriteBitcodeToFile(&M, ostream);
+}
+
 void instrumentAndEmitLLVM(llvm::Module& M) {
-   /* for(llvm::Function& F : M) {
-        for(auto& I : F) {
-            I.dump();
+    for (auto Fit = M.begin(), E = M.end(); Fit != E; ++Fit) {
+        for (auto Iit = inst_begin(&*Fit), End = inst_end(&*Fit); Iit != End; ++Iit) {
+            if (llvm::CallInst* CI = llvm::dyn_cast<llvm::CallInst>(&*Iit)) {
+                llvm::Function* f = CI->getCalledFunction();
+                std::string name = f->getName().str();
+                if(name == F_NAME) {
+                    llvm::Function* lef = llvm::Intrinsic::getDeclaration(&M,
+                                                llvm::Intrinsic::lifetime_end);
+                    CI->setCalledFunction(lef);
+                }
+            }
         }
-    }*/
+    }
+
+    emitLLVM(M);
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
-      llvm::errs() << "Usage: rewritersample <filename>\n";
+      llvm::errs() << "Usage: scopes-marker <filename>\n";
       return 1;
     }
 
@@ -224,11 +257,24 @@ int main(int argc, char *argv[]) {
     ParseAST(TheCompInst.getPreprocessor(), &TheConsumer,
              TheCompInst.getASTContext());
 
+     // At this point the rewriter's buffer should be full with the rewritten
+    // file contents.
+    const RewriteBuffer *RewriteBuf =
+        TheRewriter.getRewriteBufferFor(SourceMgr.getMainFileID());
+    llvm::outs() << std::string(RewriteBuf->begin(), RewriteBuf->end());
+
+    std::ofstream outfile ("tmp.c");
+    std::string code = "void " + F_NAME + "(long int, void*);\n" +
+                       std::string(RewriteBuf->begin(), RewriteBuf->end());
+    outfile << code << std::endl;
+    outfile.close();
+
     std::vector<const char *> aargs;
     aargs.push_back("clang");
-    aargs.push_back(argv[1]);
+    aargs.push_back("tmp.c");
 
     std::unique_ptr<CompilerInvocation> CI(createInvocationFromCommandLine(aargs));
+
 
     TheCompInst.setInvocation(CI.release());
 
@@ -241,13 +287,8 @@ int main(int argc, char *argv[]) {
         instrumentAndEmitLLVM(*M);
     }
 
-    // At this point the rewriter's buffer should be full with the rewritten
-    // file contents.
-    const RewriteBuffer *RewriteBuf =
-        TheRewriter.getRewriteBufferFor(SourceMgr.getMainFileID());
-    llvm::outs() << std::string(RewriteBuf->begin(), RewriteBuf->end());
-
-    //TODO delete module
+    // Delete temporary C file.
+    std::remove("tmp.c");
 
     return 0;
 }
