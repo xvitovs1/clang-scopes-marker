@@ -159,7 +159,7 @@ private:
   ASTContext& AContext;
 
   std::string getFunctionCall(std::string varName) {
-       return F_NAME + "(sizeof(" + varName + "), (void*)" + varName + ");\n";
+       return F_NAME + "(sizeof(" + varName + "), &" + varName + ");\n";
   }
 };
 
