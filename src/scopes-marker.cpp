@@ -271,6 +271,7 @@ int main(int argc, char *argv[]) {
 
     std::vector<const char *> aargs;
     aargs.push_back("clang");
+    aargs.push_back("-g");
     aargs.push_back("tmp.c");
 
     std::unique_ptr<CompilerInvocation> CI(createInvocationFromCommandLine(aargs));
