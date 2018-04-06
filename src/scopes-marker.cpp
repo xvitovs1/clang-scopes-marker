@@ -210,12 +210,7 @@ void instrumentAndEmitLLVM(llvm::Module& M) {
     emitLLVM(M);
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-      llvm::errs() << "Usage: scopes-marker <filename>\n";
-      return 1;
-    }
-
+void processFile(std::string path, std::vector<const char*>& args) {
     // CompilerInstance will hold the instance of the Clang compiler for us,
     // managing the various objects needed to run the compiler.
     CompilerInstance TheCompInst;
@@ -243,7 +238,7 @@ int main(int argc, char *argv[]) {
     TheRewriter.setSourceMgr(SourceMgr, TheCompInst.getLangOpts());
 
     // Set the main file handled by the source manager to the input file.
-    const FileEntry *FileIn = FileMgr.getFile(argv[1]);
+    const FileEntry *FileIn = FileMgr.getFile(path);
     SourceMgr.setMainFileID(
         SourceMgr.createFileID(FileIn, SourceLocation(), SrcMgr::C_User));
     TheCompInst.getDiagnosticClient().BeginSourceFile(
@@ -269,13 +264,8 @@ int main(int argc, char *argv[]) {
     outfile << code << std::endl;
     outfile.close();
 
-    std::vector<const char *> aargs;
-    aargs.push_back("clang");
-    aargs.push_back("-g");
-    aargs.push_back("tmp.c");
-
-    std::unique_ptr<CompilerInvocation> CI(createInvocationFromCommandLine(aargs));
-
+    args.push_back("tmp.c");
+    std::unique_ptr<CompilerInvocation> CI(createInvocationFromCommandLine(args));
 
     TheCompInst.setInvocation(CI.release());
 
@@ -290,6 +280,20 @@ int main(int argc, char *argv[]) {
 
     // Delete temporary C file.
     std::remove("tmp.c");
+    delete(Act);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+      llvm::errs() << "Usage: scopes-marker <filename>\n";
+      return 1;
+    }
+
+    std::vector<const char *> aargs;
+    aargs.push_back("clang");
+    aargs.push_back("-g");
+
+    processFile(argv[1], aargs);
 
     return 0;
 }
