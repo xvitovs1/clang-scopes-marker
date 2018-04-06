@@ -54,14 +54,39 @@ struct VarInfo {
     bool isLoop = false;
 };
 
-// By implementing RecursiveASTVisitor, we can specify which AST nodes
-// we're interested in by overriding relevant methods.
-class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
+// Visitor for adding curly braces
+class BracesASTVisitor : public RecursiveASTVisitor<BracesASTVisitor> {
 public:
-  MyASTVisitor(Rewriter &R, ASTContext &AC) : TheRewriter(R), AContext(AC) {}
+  BracesASTVisitor(Rewriter &R, ASTContext &AC) : TheRewriter(R), AContext(AC) {}
 
   bool VisitStmt(Stmt* s) {
 
+      // Process ifs without compound stmt
+      if (isa<IfStmt>(s)) {
+          IfStmt* ifs = cast<IfStmt>(s);
+          Stmt* then = ifs->getThen();
+          if (!isa<CompoundStmt>(*(then->children().begin()))) {
+              SourceLocation SLB = then->getSourceRange().getBegin();
+              SourceLocation SLE = then->getSourceRange().getEnd();
+             // TheRewriter.InsertTextBefore(SLB, "{");
+             // TheRewriter.InsertTextAfter(SLE, "}");
+          }
+      }
+
+      return true;
+  }
+
+private:
+  Rewriter &TheRewriter;
+  ASTContext& AContext;
+};
+
+// Visitor for adding lifetime marks
+class LifetimesASTVisitor : public RecursiveASTVisitor<LifetimesASTVisitor> {
+public:
+  LifetimesASTVisitor(Rewriter &R, ASTContext &AC) : TheRewriter(R), AContext(AC) {}
+
+  bool VisitStmt(Stmt* s) {
       FullSourceLoc loc = AContext.getFullLoc(s->getSourceRange().getBegin());
       if (!vars.empty()) {
         FullSourceLoc varLoc = vars.back().locEnd;
@@ -104,6 +129,7 @@ public:
           }
       }
 
+
       // Process loops.
       if (isa<ForStmt>(s) || isa<DoStmt>(s) || isa<WhileStmt>(s)) {
           vars.push_back(VarInfo("",
@@ -136,7 +162,6 @@ public:
           }
       }
 
-
       return true;
   }
 
@@ -159,15 +184,13 @@ private:
   ASTContext& AContext;
 
   std::string getFunctionCall(std::string varName) {
-       return F_NAME + "(sizeof(" + varName + "), &" + varName + ");\n";
+       return F_NAME + "(sizeof(" + varName + "), &" + varName + ");";
   }
 };
 
-// Implementation of the ASTConsumer interface for reading an AST produced
-// by the Clang parser.
-class MyASTConsumer : public ASTConsumer {
+class LifetimesASTConsumer : public ASTConsumer {
 public:
-  MyASTConsumer(Rewriter &R, ASTContext &AC) : Visitor(R, AC) {}
+  LifetimesASTConsumer(Rewriter &R, ASTContext &AC) : Visitor(R, AC) {}
 
   // Override the method that gets called for each parsed top-level
   // declaration.
@@ -179,7 +202,24 @@ public:
   }
 
 private:
-  MyASTVisitor Visitor;
+  LifetimesASTVisitor Visitor;
+};
+
+class BracesASTConsumer : public ASTConsumer {
+public:
+  BracesASTConsumer(Rewriter &R, ASTContext &AC) : Visitor(R, AC) {}
+
+  // Override the method that gets called for each parsed top-level
+  // declaration.
+  virtual bool HandleTopLevelDecl(DeclGroupRef DR) {
+    for (DeclGroupRef::iterator b = DR.begin(), e = DR.end(); b != e; ++b)
+      // Traverse the declaration using our AST visitor.
+      Visitor.TraverseDecl(*b);
+    return true;
+  }
+
+private:
+  BracesASTVisitor Visitor;
 };
 
 void emitLLVM(llvm::Module& M) {
@@ -210,10 +250,9 @@ void instrumentAndEmitLLVM(llvm::Module& M) {
     emitLLVM(M);
 }
 
-void processFile(std::string path, std::vector<const char*>& args) {
+void setCompilerInstance(CompilerInstance& TheCompInst, std::string path) {
     // CompilerInstance will hold the instance of the Clang compiler for us,
     // managing the various objects needed to run the compiler.
-    CompilerInstance TheCompInst;
     TheCompInst.createDiagnostics();
 
     LangOptions &lo = TheCompInst.getLangOpts();
@@ -233,38 +272,69 @@ void processFile(std::string path, std::vector<const char*>& args) {
     TheCompInst.createPreprocessor(TU_Module);
     TheCompInst.createASTContext();
 
-    // A Rewriter helps us manage the code rewriting task.
-    Rewriter TheRewriter;
-    TheRewriter.setSourceMgr(SourceMgr, TheCompInst.getLangOpts());
-
     // Set the main file handled by the source manager to the input file.
     const FileEntry *FileIn = FileMgr.getFile(path);
     SourceMgr.setMainFileID(
         SourceMgr.createFileID(FileIn, SourceLocation(), SrcMgr::C_User));
     TheCompInst.getDiagnosticClient().BeginSourceFile(
         TheCompInst.getLangOpts(), &TheCompInst.getPreprocessor());
+}
+
+template<typename T>
+std::string processFile(std::string path) {
+    CompilerInstance TheCompInst;
+    setCompilerInstance(TheCompInst, path);
+    SourceManager &SourceMgr = TheCompInst.getSourceManager();
+
+    // A Rewriter helps us manage the code rewriting task.
+    Rewriter TheRewriter;
+    TheRewriter.setSourceMgr(SourceMgr, TheCompInst.getLangOpts());
 
     // Create an AST consumer instance which is going to get called by
     // ParseAST.
-    MyASTConsumer TheConsumer(TheRewriter, TheCompInst.getASTContext());
+    T TheConsumer(TheRewriter, TheCompInst.getASTContext());
 
     // Parse the file to AST, registering our consumer as the AST consumer.
     ParseAST(TheCompInst.getPreprocessor(), &TheConsumer,
              TheCompInst.getASTContext());
 
-     // At this point the rewriter's buffer should be full with the rewritten
+    // At this point the rewriter's buffer should be full with the rewritten
     // file contents.
-    const RewriteBuffer *RewriteBuf =
+    const RewriteBuffer* RewriteBuf =
         TheRewriter.getRewriteBufferFor(SourceMgr.getMainFileID());
-    llvm::outs() << std::string(RewriteBuf->begin(), RewriteBuf->end());
 
-    std::ofstream outfile ("tmp.c");
-    std::string code = "void " + F_NAME + "(long int, void*);\n" +
-                       std::string(RewriteBuf->begin(), RewriteBuf->end());
-    outfile << code << std::endl;
+    if (RewriteBuf) {
+        return std::string(RewriteBuf->begin(), RewriteBuf->end());
+    }
+    else {
+        std::ifstream ifs(path);
+        return std::string((std::istreambuf_iterator<char>(ifs)),
+                            (std::istreambuf_iterator<char>()));
+    }
+}
+
+void runTransformations(std::string path, std::vector<const char*>& args) {
+    llvm::errs() << "--------------------\n";
+    // Transformation 1: add curly braces where needed.
+    auto code = processFile<BracesASTConsumer>(path);
+    std::ofstream outfile ("tmp1.c");
+    std::string allCode = "void " + F_NAME + "(long int, void*);\n" + code;
+    outfile << allCode << std::endl;
     outfile.close();
+    llvm::errs() << code << "\n";
 
-    args.push_back("tmp.c");
+    llvm::errs() << "--------------------\n";
+    // Transformation 2: add lifetime marks.
+    code = processFile<LifetimesASTConsumer>("tmp1.c");
+    std::ofstream outfile2 ("tmp2.c");
+    outfile2 << code << std::endl;
+    outfile2.close();
+    llvm::errs() << code << "\n";
+    llvm::errs() << "--------------------\n";
+
+    CompilerInstance TheCompInst;
+    setCompilerInstance(TheCompInst, "tmp2.c");
+    args.push_back("tmp2.c");
     std::unique_ptr<CompilerInvocation> CI(createInvocationFromCommandLine(args));
 
     TheCompInst.setInvocation(CI.release());
@@ -278,8 +348,9 @@ void processFile(std::string path, std::vector<const char*>& args) {
         instrumentAndEmitLLVM(*M);
     }
 
-    // Delete temporary C file.
-    std::remove("tmp.c");
+    // Delete temporary C files.
+    std::remove("tmp1.c");
+    std::remove("tmp2.c");
     delete(Act);
 }
 
@@ -293,7 +364,7 @@ int main(int argc, char *argv[]) {
     aargs.push_back("clang");
     aargs.push_back("-g");
 
-    processFile(argv[1], aargs);
+    runTransformations(argv[1], aargs);
 
     return 0;
 }
