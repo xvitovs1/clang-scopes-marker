@@ -15,6 +15,7 @@
 #include "clang/Basic/TargetOptions.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Preprocessor.h"
+#include "clang/Lex/Lexer.h"
 #include "clang/Parse/ParseAST.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Rewrite/Frontend/Rewriters.h"
@@ -64,12 +65,15 @@ public:
       // Process ifs without compound stmt
       if (isa<IfStmt>(s)) {
           IfStmt* ifs = cast<IfStmt>(s);
+
           Stmt* then = ifs->getThen();
           if (!isa<CompoundStmt>(*(then->children().begin()))) {
-              SourceLocation SLB = then->getSourceRange().getBegin();
-              SourceLocation SLE = then->getSourceRange().getEnd();
-             // TheRewriter.InsertTextBefore(SLB, "{");
-             // TheRewriter.InsertTextAfter(SLE, "}");
+              insertBraces(then->getLocStart(), then->getLocEnd());
+          }
+
+          Stmt* elseS = ifs->getElse();
+          if (elseS && !isa<CompoundStmt>(*(elseS->children().begin()))) {
+              insertBraces(elseS->getLocStart(), elseS->getLocEnd());
           }
       }
 
@@ -79,6 +83,16 @@ public:
 private:
   Rewriter &TheRewriter;
   ASTContext& AContext;
+  void insertBraces(SourceLocation SLB, SourceLocation SLE) {
+      // SLE is not a location after semicolon,
+      // we need to get it with findLocationAfterToken
+      SourceLocation END = Lexer::findLocationAfterToken(SLE, tok::semi,
+                                    TheRewriter.getSourceMgr(),
+                                    TheRewriter.getLangOpts(), false);
+      TheRewriter.InsertTextAfter(END, "}");
+      TheRewriter.InsertTextBefore(SLB, "{");
+
+  }
 };
 
 // Visitor for adding lifetime marks
