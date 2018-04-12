@@ -67,12 +67,16 @@ public:
           IfStmt* ifs = cast<IfStmt>(s);
 
           Stmt* then = ifs->getThen();
-          if (!isa<CompoundStmt>(*(then->children().begin()))) {
+          if (then->children().begin() == then->children().begin()
+               || !isa<CompoundStmt>(*(then->children().begin())))
+          {
               insertBraces(then->getLocStart(), then->getLocEnd());
           }
 
           Stmt* elseS = ifs->getElse();
-          if (elseS && !isa<CompoundStmt>(*(elseS->children().begin()))) {
+          if (elseS && (elseS->children().begin() == elseS->children().end()
+                        || !isa<CompoundStmt>(*(elseS->children().begin()))))
+          {
               insertBraces(elseS->getLocStart(), elseS->getLocEnd());
           }
       }
@@ -116,21 +120,22 @@ public:
           std::vector<std::string> localVars;
           CompoundStmt *compoundStmt = cast<CompoundStmt>(s);
 
+          // Get all variable declarations for this scope.
           for (auto* c : compoundStmt->children()) {
-              if (isa<DeclStmt>(c)) {
-                  DeclStmt* ds = cast<DeclStmt>(c);
-                  for (auto* d : ds->decls()) {
-                      VarDecl* varDecl = dyn_cast<VarDecl>(d);
-                      if (varDecl && varDecl->isLocalVarDecl()) {
-                          localVars.push_back(varDecl->getNameAsString());
-                          vars.push_back(VarInfo(varDecl->getNameAsString(),
-                             AContext.getFullLoc(varDecl->getSourceRange().getEnd()),
-                             AContext.getFullLoc(compoundStmt->getSourceRange().getEnd()),
-                             false));
-                      }
-                  }
-              }
+              processDecls(c, localVars, compoundStmt);
               last = c;
+          }
+
+          // for(int i...): i is also a variable declaration
+          // for this scope.
+          auto parents = AContext.getParents(*s);
+          if (parents.begin() != parents.end()) {
+              const ForStmt* forS = parents.begin()->get<ForStmt>();
+              if (forS) {
+                const Stmt* init = forS->getInit();
+                if (init)
+                    processDecls(init, localVars, compoundStmt);
+              }
           }
 
           SourceLocation SL;
@@ -143,7 +148,6 @@ public:
           }
       }
 
-
       // Process loops.
       if (isa<ForStmt>(s) || isa<DoStmt>(s) || isa<WhileStmt>(s)) {
           vars.push_back(VarInfo("",
@@ -152,17 +156,6 @@ public:
                   true));
       }
 
-      // Process returns.
-      if (isa<ReturnStmt>(s)) {
-          FullSourceLoc SL = AContext.getFullLoc(s->getSourceRange().getBegin());
-          for(auto rit = vars.rbegin(); rit != vars.rend(); ++rit) {
-              if (rit->name == "" && !rit->isLoop)
-                  break;
-              if (rit->name != "" && rit->locStart.isBeforeInTranslationUnitThan(SL)) {
-                  TheRewriter.InsertTextBefore(SL, getFunctionCall(rit->name));
-              }
-          }
-      }
 
       // Process breaks and continues.
       if (isa<BreakStmt>(s) || isa<ContinueStmt>(s)) {
@@ -196,6 +189,22 @@ private:
   std::vector<VarInfo> vars;
   Rewriter &TheRewriter;
   ASTContext& AContext;
+  void processDecls(const Stmt* s, std::vector<std::string>& localVars, CompoundStmt* compoundStmt) {
+      if (isa<DeclStmt>(s)) {
+          const DeclStmt* ds = cast<DeclStmt>(s);
+          for (auto* d : ds->decls()) {
+              const VarDecl* varDecl = dyn_cast<VarDecl>(d);
+              if (varDecl && varDecl->isLocalVarDecl()) {
+                  localVars.push_back(varDecl->getNameAsString());
+                  vars.push_back(VarInfo(varDecl->getNameAsString(),
+                     AContext.getFullLoc(varDecl->getSourceRange().getEnd()),
+                     AContext.getFullLoc(compoundStmt->getSourceRange().getEnd()),
+                     false));
+              }
+          }
+      }
+
+  }
 
   std::string getFunctionCall(std::string varName) {
        return F_NAME + "(sizeof(" + varName + "), &" + varName + ");";
