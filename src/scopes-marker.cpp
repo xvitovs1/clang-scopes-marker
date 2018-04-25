@@ -81,6 +81,19 @@ public:
           }
       }
 
+      // Process for loops without compound stmt
+      if (isa<ForStmt>(s)) {
+          ForStmt* fors = cast<ForStmt>(s);
+
+          Stmt* body = fors->getBody();
+          if (body->children().begin() == body->children().begin()
+               || !isa<CompoundStmt>(*(body->children().begin())))
+          {
+              insertBraces(body->getLocStart(), body->getLocEnd());
+          }
+      }
+
+
       return true;
   }
 
@@ -189,7 +202,9 @@ private:
   std::vector<VarInfo> vars;
   Rewriter &TheRewriter;
   ASTContext& AContext;
-  void processDecls(const Stmt* s, std::vector<std::string>& localVars, CompoundStmt* compoundStmt) {
+  void processDecls(const Stmt* s, std::vector<std::string>& localVars,
+                    CompoundStmt* compoundStmt)
+  {
       if (isa<DeclStmt>(s)) {
           const DeclStmt* ds = cast<DeclStmt>(s);
           for (auto* d : ds->decls()) {
