@@ -67,15 +67,13 @@ public:
           IfStmt* ifs = cast<IfStmt>(s);
 
           Stmt* then = ifs->getThen();
-          if (then->children().begin() == then->children().begin()
-               || !isa<CompoundStmt>(*(then->children().begin())))
+          if (!isa<CompoundStmt>(then))
           {
               insertBraces(then->getLocStart(), then->getLocEnd());
           }
 
           Stmt* elseS = ifs->getElse();
-          if (elseS && (elseS->children().begin() == elseS->children().end()
-                        || !isa<CompoundStmt>(*(elseS->children().begin()))))
+          if (elseS && !isa<CompoundStmt>(elseS))
           {
               insertBraces(elseS->getLocStart(), elseS->getLocEnd());
           }
@@ -86,8 +84,7 @@ public:
           ForStmt* fors = cast<ForStmt>(s);
 
           Stmt* body = fors->getBody();
-          if (body->children().begin() == body->children().begin()
-               || !isa<CompoundStmt>(*(body->children().begin())))
+          if (!isa<CompoundStmt>(body))
           {
               insertBraces(body->getLocStart(), body->getLocEnd());
           }
@@ -373,9 +370,9 @@ void runTransformations(std::string path, std::vector<const char*>& args) {
     CompilerInstance TheCompInst;
     setCompilerInstance(TheCompInst, "tmp2.c");
     args.push_back("tmp2.c");
-    std::unique_ptr<CompilerInvocation> CI(createInvocationFromCommandLine(args));
+    std::shared_ptr<CompilerInvocation> CI(std::move(createInvocationFromCommandLine(args)));
 
-    TheCompInst.setInvocation(CI.release());
+    TheCompInst.setInvocation(CI);
 
     // Get llvm module.
     EmitLLVMOnlyAction *Act = new EmitLLVMOnlyAction();
